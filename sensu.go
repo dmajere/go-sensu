@@ -16,12 +16,12 @@ type sensu struct {
 	options *sensuOptions
 	client  *sensuClient
 
-	rabbitAddr      *url.URL
-	rabbitCfg       *tls.Config
-	rabbitConn      *amqp.Connection
-	rabbitChan      *amqp.Channel
+	rabbitAddr            *url.URL
+	rabbitCfg             *tls.Config
+	rabbitConn            *amqp.Connection
+	rabbitChan            *amqp.Channel
 	rabbitConnectionReady chan bool
-	rabbitReconnect chan bool
+	rabbitReconnect       chan bool
 
 	publishChan chan *Message
 	exitChan    chan int
@@ -47,19 +47,19 @@ func Sensu(opt *sensuOptions) *sensu {
 
 	s := &sensu{
 
-		options:         opt,
-		client:          &opt.Client,
-		rabbitAddr:      &rabbitAddr,
-		rabbitCfg:       rabbitCfg,
-		rabbitReconnect: make(chan bool),
+		options:               opt,
+		client:                &opt.Client,
+		rabbitAddr:            &rabbitAddr,
+		rabbitCfg:             rabbitCfg,
+		rabbitReconnect:       make(chan bool),
 		rabbitConnectionReady: make(chan bool),
-		publishChan:     make(chan *Message),
-		exitChan:        make(chan int),
+		publishChan:           make(chan *Message),
+		exitChan:              make(chan int),
 	}
 
 	s.client.Keepalive.Thresholds.Warning = 120
-	s.client.Keepalive.Thresholds.Critical =180
-	
+	s.client.Keepalive.Thresholds.Critical = 180
+
 	return s
 }
 
@@ -110,7 +110,7 @@ func (s *sensu) connectRabbit() {
 		fmt.Println("Reconnect")
 		s.setupRabbit()
 		s.rabbitConnectionReady <- true
-		<-s.rabbitReconnect	
+		<-s.rabbitReconnect
 	}
 }
 
@@ -134,7 +134,7 @@ func (s *sensu) standaloneSetup() {
 				}
 
 				s.publishChan <- &Message{"results", body}
-				
+
 				time.Sleep(time.Duration(check.Interval) * time.Second)
 			}
 		}()
@@ -171,7 +171,7 @@ func (s *sensu) Consume() {
 		msg, ok := <-checks
 		if !ok {
 			s.rabbitReconnect <- true
-			<- s.rabbitConnectionReady
+			<-s.rabbitConnectionReady
 			continue
 		}
 
@@ -203,7 +203,6 @@ func (s *sensu) Publish() {
 
 	for message := range s.publishChan {
 
-
 		msg := amqp.Publishing{
 			DeliveryMode: amqp.Persistent,
 			Timestamp:    time.Now(),
@@ -217,12 +216,10 @@ func (s *sensu) Publish() {
 	}
 }
 
-
-
 func (s *sensu) Start() {
 
 	go s.connectRabbit()
-	<- s.rabbitConnectionReady
+	<-s.rabbitConnectionReady
 
 	s.standaloneSetup()
 

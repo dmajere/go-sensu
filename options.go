@@ -21,7 +21,6 @@ type rabbitSSLOptions struct {
 	Cert_chain_file  string
 }
 
-
 type ClientKeepalive struct {
 	Thresholds ClientKeepaliveThresholds `json:"thresholds"`
 	Handler    string                    `json:"handler"`

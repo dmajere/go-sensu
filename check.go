@@ -1,11 +1,12 @@
-
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -21,16 +22,35 @@ type sensuCheckRemote struct {
 
 func (s *sensuCheckRemote) Execute() {
 
-	start := time.Now()
 	command := strings.Split(s.Command, " ")
-	out, err := exec.Command(command[0], command[1:]...).CombinedOutput()
-	log.Println(out, err)
-	s.Executed = start.Unix()
-	s.Duration = fmt.Sprintf("%.3f", time.Since(start).Seconds())
-	s.Status = 0
-	s.Output = string(out)
-	if err != nil {
-		s.Status = 1
+	cmd := exec.Command(command[0], command[1:]...)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		s.Status = 127
+		s.Output = err.Error()
+	} else {
+
+		if err := cmd.Wait(); err != nil {
+			if exiterr, ok := err.(*exec.ExitError); ok {
+				if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+					s.Status = uint8(status.ExitStatus())
+					log.Printf("Exit Status: %d; Output: %s", status.ExitStatus(), out.Bytes())
+				}
+			} else {
+				s.Status = 1
+				s.Output = err.Error()
+			}
+		} else {
+			s.Status = 0
+		}
+		s.Executed = start.Unix()
+		s.Duration = fmt.Sprintf("%.3f", time.Since(start).Seconds())
+		s.Output = string(out.Bytes())
 	}
 }
 
