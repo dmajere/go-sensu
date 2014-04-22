@@ -22,6 +22,7 @@ type sensu struct {
 	rabbitConnectionClose   chan int
 	rabbitConnectionRestart chan int
 
+	checks      chan amqp.Delivery
 	publishChan chan *Message
 	exitChan    chan int
 }
@@ -75,28 +76,32 @@ func (s *sensu) Exit() {
 }
 
 func (s *sensu) setupRabbit() {
-	var sync uint32
+	var syncReconnect int32
+	atomic.StoreInt32(&syncReconnect, 0)
 	conn := setupRabbit(s)
-	for {
-		select {
-		case <-s.rabbitConnectionClose:
-			conn.Close()
-			break
-		case <-s.rabbitConnectionRestart:
-			if sync == 0 {
-				atomic.StoreUint32(&sync, 1)
-				conn = setupRabbit(s)
-				time.Sleep(5 * time.Second)
-				atomic.StoreUint32(&sync, 0)
+	go func() {
+
+		for {
+			select {
+			case <-s.rabbitConnectionClose:
+				conn.Close()
+				break
+			case <-s.rabbitConnectionRestart:
+				if atomic.LoadInt32(&syncReconnect) == 0 {
+					atomic.StoreInt32(&syncReconnect, 1)
+					conn = setupRabbit(s)
+					time.Sleep(5 * time.Second)
+					atomic.StoreInt32(&syncReconnect, 0)
+				}
+			default:
 			}
-		default:
 		}
-	}
+	}()
 }
 
 func (s *sensu) ConsumeAndServe() {
-	c := s.Consume()
-	go s.Serve(c)
+	//c := s.Consume()
+	go s.Serve(s.checks)
 }
 
 func (s *sensu) Consume() <-chan amqp.Delivery {

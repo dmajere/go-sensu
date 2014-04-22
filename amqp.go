@@ -55,8 +55,13 @@ func rabbitDeclareQueue(ch *amqp.Channel, sub []string) {
 
 func setupRabbit(s *sensu) *amqp.Connection {
 	var conn *amqp.Connection
+	var err error
 	conn, s.rabbitChan = rabbitConnect(s.rabbitAddr.String(), s.rabbitCfg)
 	rabbitDeclareExchanges(s.rabbitChan)
 	rabbitDeclareQueue(s.rabbitChan, s.client.Subscriptions)
+	s.checks, err = s.rabbitChan.Consume("", s.client.Name, false, false, false, false, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 	return conn
 }
