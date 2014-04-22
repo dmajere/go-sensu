@@ -1,15 +1,17 @@
 package main
 
 import (
-	"fmt"
-	"log"
-	"net/url"
-	"time"
-
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"github.com/streadway/amqp"
+	"log"
+	"net/url"
+	"os/user"
+	"strconv"
+	"syscall"
+	"time"
 )
 
 type sensu struct {
@@ -217,7 +219,16 @@ func (s *sensu) Publish() {
 }
 
 func (s *sensu) Start() {
+	u, err := user.Lookup("sensu")
+	if err != nil {
+		log.Fatal("No Such User: sensu")
+	}
 
+	uid, err := strconv.ParseInt(u.Uid, 10, 0)
+	if err != nil {
+		log.Fatal("Cant Get User Uid")
+	}
+	syscall.Setuid(int(uid))
 	go s.connectRabbit()
 	<-s.rabbitConnectionReady
 

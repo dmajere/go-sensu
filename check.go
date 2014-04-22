@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -22,8 +21,7 @@ type sensuCheckRemote struct {
 
 func (s *sensuCheckRemote) Execute() {
 
-	command := strings.Split(s.Command, " ")
-	cmd := exec.Command(command[0], command[1:]...)
+	cmd := exec.Command("sh", "-c", s.Command)
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
