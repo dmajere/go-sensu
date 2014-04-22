@@ -8,9 +8,7 @@ import (
 	"github.com/streadway/amqp"
 	"log"
 	"net/url"
-	"os/user"
-	"strconv"
-	"syscall"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,12 +16,11 @@ type sensu struct {
 	options *sensuOptions
 	client  *sensuClient
 
-	rabbitAddr            *url.URL
-	rabbitCfg             *tls.Config
-	rabbitConn            *amqp.Connection
-	rabbitChan            *amqp.Channel
-	rabbitConnectionReady chan bool
-	rabbitReconnect       chan bool
+	rabbitAddr              *url.URL
+	rabbitCfg               *tls.Config
+	rabbitChan              *amqp.Channel
+	rabbitConnectionClose   chan int
+	rabbitConnectionRestart chan int
 
 	publishChan chan *Message
 	exitChan    chan int
@@ -49,14 +46,14 @@ func Sensu(opt *sensuOptions) *sensu {
 
 	s := &sensu{
 
-		options:               opt,
-		client:                &opt.Client,
-		rabbitAddr:            &rabbitAddr,
-		rabbitCfg:             rabbitCfg,
-		rabbitReconnect:       make(chan bool),
-		rabbitConnectionReady: make(chan bool),
-		publishChan:           make(chan *Message),
-		exitChan:              make(chan int),
+		options:                 opt,
+		client:                  &opt.Client,
+		rabbitAddr:              &rabbitAddr,
+		rabbitCfg:               rabbitCfg,
+		rabbitConnectionClose:   make(chan int),
+		rabbitConnectionRestart: make(chan int),
+		publishChan:             make(chan *Message),
+		exitChan:                make(chan int),
 	}
 
 	s.client.Keepalive.Thresholds.Warning = 120
@@ -65,54 +62,102 @@ func Sensu(opt *sensuOptions) *sensu {
 	return s
 }
 
+func (s *sensu) Start() {
+	go s.setupRabbit()
+	s.ConsumeAndServe()
+	go s.standaloneSetup()
+	go s.KeepAlive()
+	go s.Publish()
+}
+
+func (s *sensu) Exit() {
+	s.rabbitConnectionClose <- 1
+}
+
 func (s *sensu) setupRabbit() {
-
-	conn, err := amqp.DialTLS(s.rabbitAddr.String(), s.rabbitCfg)
-	if err != nil {
-		log.Fatalf("amqp.DialTLS: %v", err)
-	}
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("conn.Channel: %v", err)
-	}
-	s.rabbitConn, s.rabbitChan = conn, ch
-
-	err = ch.ExchangeDeclare("keepalives", "direct", false, false, false, false, nil)
-	if err != nil {
-		log.Fatalf("exchange.declare keepalive: %v", err)
-	}
-
-	err = ch.ExchangeDeclare("results", "direct", false, false, false, false, nil)
-	if err != nil {
-		log.Fatalf("exchange.declare results: %v", err)
-	}
-
-	queue, err := ch.QueueDeclare("", true, true, false, false, nil)
-	if err != nil {
-		log.Fatalf("queue.declare: %v", err)
-	}
-
-	for _, exchange := range s.client.Subscriptions {
-
-		err = ch.ExchangeDeclare(exchange, "fanout", false, false, false, false, nil)
-		if err != nil {
-			log.Fatalf("exchange.declare: %v", err)
-		}
-
-		err = ch.QueueBind(queue.Name, "", exchange, false, nil)
-		if err != nil {
-			log.Fatalf("queue.bind: %v", err)
+	var sync uint32
+	conn := setupRabbit(s)
+	for {
+		select {
+		case <-s.rabbitConnectionClose:
+			conn.Close()
+			break
+		case <-s.rabbitConnectionRestart:
+			if sync == 0 {
+				atomic.StoreUint32(&sync, 1)
+				conn = setupRabbit(s)
+				time.Sleep(5 * time.Second)
+				atomic.StoreUint32(&sync, 0)
+			}
+		default:
 		}
 	}
 }
 
-func (s *sensu) connectRabbit() {
+func (s *sensu) ConsumeAndServe() {
+	c := s.Consume()
+	go s.Serve(c)
+}
 
+func (s *sensu) Consume() <-chan amqp.Delivery {
+
+	checks, err := s.rabbitChan.Consume("", s.client.Name, false, false, false, false, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return checks
+}
+
+func (s *sensu) Serve(checks <-chan amqp.Delivery) {
 	for {
-		fmt.Println("Reconnect")
-		s.setupRabbit()
-		s.rabbitConnectionReady <- true
-		<-s.rabbitReconnect
+		select {
+		case <-s.exitChan:
+			break
+		case msg, ok := <-checks:
+			if !ok {
+				s.rabbitConnectionRestart <- 1
+			} else {
+				go s.handleCheck(&msg)
+			}
+		default:
+		}
+	}
+}
+
+func (s *sensu) handleCheck(msg *amqp.Delivery) {
+	var check *sensuCheckRemote
+	err := json.Unmarshal(msg.Body, &check)
+	if err != nil {
+		log.Fatal(err)
+	}
+	check.Execute()
+
+	result := &RemoteResult{
+		Client: s.client.Name,
+		Check:  check,
+	}
+
+	body, err := json.Marshal(result)
+	if err != nil {
+		log.Fatalf("json encoder: %s", err)
+	}
+	s.publishChan <- &Message{"results", body}
+}
+
+func (s *sensu) Publish() {
+
+	for message := range s.publishChan {
+
+		msg := amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			Timestamp:    time.Now(),
+			ContentType:  "text/plain",
+			Body:         message.body,
+		}
+		err := s.rabbitChan.Publish(message.exchange, "", false, false, msg)
+		if err != nil {
+			log.Fatalf("channel.publish: %s", err)
+		}
 	}
 }
 
@@ -157,85 +202,4 @@ func (s *sensu) KeepAlive() {
 		s.publishChan <- &Message{"keepalives", body}
 		time.Sleep(20 * time.Second)
 	}
-}
-
-func (s *sensu) Consume() {
-
-	var check *sensuCheckRemote
-
-	checks, err := s.rabbitChan.Consume("", s.client.Name, false, false, false, false, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for {
-
-		msg, ok := <-checks
-		if !ok {
-			s.rabbitReconnect <- true
-			<-s.rabbitConnectionReady
-			continue
-		}
-
-		err = json.Unmarshal(msg.Body, &check)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		go func() {
-
-			check.Execute()
-
-			result := &RemoteResult{
-				Client: s.client.Name,
-				Check:  check,
-			}
-
-			body, err := json.Marshal(result)
-			if err != nil {
-				log.Fatalf("json encoder: %s", err)
-			}
-
-			s.publishChan <- &Message{"results", body}
-		}()
-	}
-}
-
-func (s *sensu) Publish() {
-
-	for message := range s.publishChan {
-
-		msg := amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			Timestamp:    time.Now(),
-			ContentType:  "text/plain",
-			Body:         message.body,
-		}
-		err := s.rabbitChan.Publish(message.exchange, "", false, false, msg)
-		if err != nil {
-			log.Fatalf("channel.publish: %s", err)
-		}
-	}
-}
-
-func (s *sensu) Start() {
-	u, err := user.Lookup("sensu")
-	if err != nil {
-		log.Fatal("No Such User: sensu")
-	}
-
-	uid, err := strconv.ParseInt(u.Uid, 10, 0)
-	if err != nil {
-		log.Fatal("Cant Get User Uid")
-	}
-	syscall.Setuid(int(uid))
-	go s.connectRabbit()
-	<-s.rabbitConnectionReady
-
-	s.standaloneSetup()
-
-	go s.KeepAlive()
-	go s.Consume()
-	go s.Publish()
-
 }
