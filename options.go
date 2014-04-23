@@ -44,24 +44,3 @@ type sensuOptions struct {
 	Client   sensuClient
 	Checks   []sensuCheck
 }
-
-func NewSensuOptions(flagSet *flag.FlagSet) *sensuOptions {
-
-	var options *sensuOptions
-	var configFiles []string
-
-	configFiles = append(configFiles, flagSet.Lookup("config").Value.String())
-	configDir := flagSet.Lookup("config_dir").Value.String()
-	configFiles = append(configFiles, Walk(configDir)...)
-
-	for _, config := range configFiles {
-		jsonStream, err := ioutil.ReadFile(config)
-
-		if err != nil {
-			log.Fatal(err)
-		}
-		json.Unmarshal(jsonStream, &options)
-	}
-
-	return options
-}
