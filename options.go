@@ -1,12 +1,5 @@
 package main
 
-import (
-	"encoding/json"
-	"flag"
-	"io/ioutil"
-	"log"
-)
-
 type rabbitMQOptions struct {
 	SSL      rabbitSSLOptions `json:"ssl"`
 	Port     int
@@ -43,4 +36,5 @@ type sensuOptions struct {
 	Rabbitmq rabbitMQOptions
 	Client   sensuClient
 	Checks   []sensuCheck
+	LogFile  string
 }

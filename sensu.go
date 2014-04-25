@@ -23,9 +23,8 @@ type sensu struct {
 	rabbitConnectionClose   chan int
 	rabbitConnectionRestart chan int
 
-	stopServe   chan int
-	publishChan chan *Message
-	exitChan    chan int
+	stopServe chan int
+	exitChan  chan int
 }
 
 func Sensu(opt *sensuOptions) *sensu {
@@ -55,7 +54,6 @@ func Sensu(opt *sensuOptions) *sensu {
 		rabbitConnectionClose:   make(chan int),
 		rabbitConnectionRestart: make(chan int),
 		stopServe:               make(chan int),
-		publishChan:             make(chan *Message),
 		exitChan:                make(chan int),
 	}
 
@@ -66,15 +64,15 @@ func Sensu(opt *sensuOptions) *sensu {
 }
 
 func (s *sensu) Start() {
+	log.Println("Start Monitoring")
 	s.setupRabbit()
 	s.ConsumeAndServe()
 	//go s.standaloneSetup()
 	go s.KeepAlive()
-	go s.Publish()
 }
 
 func (s *sensu) Exit() {
-	fmt.Println("Exit")
+	log.Println("Stop Monitoring")
 	s.stopServe <- 1
 	s.rabbitConnectionClose <- 1
 	time.Sleep(5 * time.Second)
@@ -89,8 +87,14 @@ func (s *sensu) setupRabbit() {
 		for {
 			select {
 			case <-s.rabbitConnectionClose:
-				fmt.Println("Rabbit Conn Close")
-				s.rabbitConn.Close()
+				for {
+					if atomic.LoadInt32(&syncReconnect) == 0 {
+						atomic.StoreInt32(&syncReconnect, 1)
+						log.Println("Close RabbitMQ Connection")
+						s.rabbitConn.Close()
+						break
+					}
+				}
 				break
 			case <-s.rabbitConnectionRestart:
 				if atomic.LoadInt32(&syncReconnect) == 0 {
@@ -121,7 +125,7 @@ func (s *sensu) Serve(checks <-chan amqp.Delivery) {
 	for {
 		select {
 		case <-s.stopServe:
-			fmt.Println("Stop Serve")
+			log.Println("Stop Consuming New Checks")
 			break
 		case msg, ok := <-checks:
 			if !ok {
@@ -140,7 +144,7 @@ func (s *sensu) handleCheck(msg *amqp.Delivery) {
 		log.Fatal(err)
 	}
 	check.Execute()
-
+	log.Printf("Exit Status: %d; Output: %s", check.Status, check.Output)
 	result := &RemoteResult{
 		Client: s.client.Name,
 		Check:  check,
@@ -150,29 +154,25 @@ func (s *sensu) handleCheck(msg *amqp.Delivery) {
 	if err != nil {
 		log.Fatalf("json encoder: %s", err)
 	}
-	s.publishChan <- &Message{"results", body}
+	s.Publish("results", body)
 }
 
-func (s *sensu) Publish() {
-	var message *Message
-
+func (s *sensu) Publish(exchange string, message []byte) {
+	msg := amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		Timestamp:    time.Now(),
+		ContentType:  "text/plain",
+		Body:         message,
+	}
 	for {
-		select {
-		case message = <-s.publishChan:
-			msg := amqp.Publishing{
-				DeliveryMode: amqp.Persistent,
-				Timestamp:    time.Now(),
-				ContentType:  "text/plain",
-				Body:         message.body,
-			}
-			err := s.rabbitChan.Publish(message.exchange, "", false, false, msg)
-			if err != nil {
-				log.Fatalf("channel.publish: %s", err)
-			}
-		case <-s.stopServe:
-			fmt.Println("stop publish")
-			break
+		err := s.rabbitChan.Publish(exchange, "", false, false, msg)
+		if err != nil {
+			log.Printf("Channel Publish Error: %s. Reconnect...", err)
+			s.rabbitConnectionRestart <- 1
+			continue
+
 		}
+		break
 	}
 }
 
@@ -195,7 +195,7 @@ func (s *sensu) standaloneSetup() {
 					log.Fatalf("json encoder: %s", err)
 				}
 
-				s.publishChan <- &Message{"results", body}
+				s.Publish("results", body)
 
 				time.Sleep(time.Duration(check.Interval) * time.Second)
 			}
@@ -208,7 +208,7 @@ func (s *sensu) KeepAlive() {
 	for {
 		select {
 		case <-s.stopServe:
-			fmt.Println("StopKeepalive")
+			log.Println("Stop Sending KeepAlive Messages")
 			break
 		default:
 			s.client.Timestamp = time.Now().Unix()
@@ -217,8 +217,7 @@ func (s *sensu) KeepAlive() {
 			if err != nil {
 				log.Fatalf("json encoder: %s", err)
 			}
-
-			s.publishChan <- &Message{"keepalives", body}
+			s.Publish("keepalives", body)
 			time.Sleep(20 * time.Second)
 		}
 	}

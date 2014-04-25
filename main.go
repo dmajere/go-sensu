@@ -1,8 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
-	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -12,8 +13,8 @@ import (
 )
 
 var (
-	flagSet = flag.NewFlagSet("sensu", flag.ExitOnError)
-
+	flagSet    = flag.NewFlagSet("sensu", flag.ExitOnError)
+	username   = flagSet.String("username", "sensu", "Set user")
 	config     = flagSet.String("config", "/etc/sensu/config.json", "Sensu JSON config FILE")
 	config_dir = flagSet.String("config_dir", "/etc/sensu/conf.d/", "DIR or comma-delimited DIR list for Sensu JSON config files")
 	logfile    = flagSet.String("logfile", "/tmp/sensu-client", "Log to a given FILE")
@@ -21,31 +22,27 @@ var (
 	pid_file   = flagSet.String("pid_file", "/var/run/sensu/sensu-client.pid", "Write the PID to a given FILE")
 )
 
-func NewSensuOptions(flagSet *flag.FlagSet) *sensuOptions {
+func NewSensuOptions() *sensuOptions {
 
 	var options *sensuOptions
 	var configFiles []string
 
-	configFiles = append(configFiles, flagSet.Lookup("config").Value.String())
-	configDir := flagSet.Lookup("config_dir").Value.String()
-	configFiles = append(configFiles, Walk(configDir)...)
+	configFiles = append(configFiles, *config)
+	configFiles = append(configFiles, Walk(*config_dir)...)
 
-	for _, config := range configFiles {
-		jsonStream, err := ioutil.ReadFile(config)
+	for _, file := range configFiles {
+		jsonStream, err := ioutil.ReadFile(file)
 
 		if err != nil {
 			log.Fatal(err)
 		}
 		json.Unmarshal(jsonStream, &options)
 	}
-
 	return options
 }
 
-func main() {
-	flagSet.Parse(os.Args[1:])
-
-	u, err := user.Lookup("sensu")
+func setEnv() {
+	u, err := user.Lookup(*username)
 	if err != nil {
 		log.Fatal("No Such User: sensu")
 	}
@@ -63,16 +60,29 @@ func main() {
 	syscall.Setenv("HOME", u.HomeDir)
 	syscall.Setenv("LOGNAME", u.Name)
 
+}
+
+func main() {
+	flagSet.Parse(os.Args[1:])
+
+	f, err := os.OpenFile(*logfile, os.O_CREATE+os.O_RDWR+os.O_APPEND, 0600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.SetOutput(f)
+	defer f.Close()
+
+	setEnv()
+
 	exitChan := make(chan int)
 	signalChan := make(chan os.Signal, 1)
 	go func() {
 		<-signalChan
-		fmt.Println("Got Signal")
 		exitChan <- 1
 	}()
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
-	opts := NewSensuOptions(flagSet)
+	opts := NewSensuOptions()
 	sensu := Sensu(opts)
 
 	sensu.Start()

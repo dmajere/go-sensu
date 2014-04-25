@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"os/exec"
 	"syscall"
 	"time"
@@ -37,7 +36,6 @@ func (s *sensuCheckRemote) Execute() {
 			if exiterr, ok := err.(*exec.ExitError); ok {
 				if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
 					s.Status = uint8(status.ExitStatus())
-					log.Printf("Exit Status: %d; Output: %s", status.ExitStatus(), out.Bytes())
 				}
 			} else {
 				s.Status = 1
@@ -63,10 +61,6 @@ type sensuCheck struct {
 	Local       bool     `json:"_"`
 }
 
-type Message struct {
-	exchange string
-	body     []byte
-}
 type LocalResult struct {
 	Client string      `json:"client"`
 	Check  *sensuCheck `json:"check"`

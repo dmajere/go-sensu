@@ -54,6 +54,7 @@ func rabbitDeclareQueue(ch *amqp.Channel, sub []string) {
 }
 
 func setupRabbit(s *sensu) {
+	log.Println("Connect To RabbitMQ")
 	s.rabbitConn, s.rabbitChan = rabbitConnect(s.rabbitAddr.String(), s.rabbitCfg)
 	rabbitDeclareExchanges(s.rabbitChan)
 	rabbitDeclareQueue(s.rabbitChan, s.client.Subscriptions)
